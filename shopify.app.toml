@@ -1,0 +1,45 @@
+# This file stores configurations for your Shopify app.
+# client_id is filled in when you link a real app via `shopify app config link`.
+
+client_id = ""
+
+[access_scopes]
+# Least privilege (PRD PR-03): we only read orders to join outcomes to revenue.
+scopes = "read_orders"
+
+[webhooks]
+api_version = "2025-01"
+
+  # App lifecycle
+  [[webhooks.subscriptions]]
+  uri = "/webhooks/app/uninstalled"
+  topics = ["app/uninstalled"]
+
+  [[webhooks.subscriptions]]
+  topics = ["app/scopes_update"]
+  uri = "/webhooks/app/scopes_update"
+
+  # Revenue outcome join
+  [[webhooks.subscriptions]]
+  topics = ["orders/create"]
+  uri = "/webhooks/orders/create"
+
+  # Mandatory compliance topics for public apps
+  # See: https://shopify.dev/docs/apps/build/privacy-law-compliance
+  [[webhooks.subscriptions]]
+  uri = "/webhooks/customers/data_request"
+  compliance_topics = ["customers/data_request"]
+
+  [[webhooks.subscriptions]]
+  uri = "/webhooks/customers/redact"
+  compliance_topics = ["customers/redact"]
+
+  [[webhooks.subscriptions]]
+  uri = "/webhooks/shop/redact"
+  compliance_topics = ["shop/redact"]
+
+# Storefront capture runs through the App Proxy: the theme app extension points the snippet at
+# /apps/threeye/*, Shopify forwards those calls to this app and signs them, so we can trust the
+# `shop` param (see server/proxy/verifyProxy.ts). Same-origin from the storefront → no CORS.
+[proxy]
+subpath = "threeye"

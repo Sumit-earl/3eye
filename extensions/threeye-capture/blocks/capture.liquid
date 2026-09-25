@@ -1,0 +1,59 @@
+{%- comment -%}
+  3eye Capture — app embed block.
+
+  Injects the consent-first capture snippet on every page. Both the script and the beacon are
+  served through the App Proxy (/apps/threeye/*), so from the storefront's point of view they
+  are same-origin (no CORS preflight) and Shopify signs the request with the real shop domain —
+  which our backend verifies before trusting it. We therefore never let the theme hardcode a
+  backend URL, and the `data-shop` value here is a convenience only (the signed proxy shop wins).
+
+  Consent wiring for merchants who run a banner:
+    • set Consent mode = "Wait for my consent banner" (buffers, captures nothing yet)
+    • on accept → window.ThreeEye.consent('granted')
+    • on decline → window.ThreeEye.consent('denied')   (drops any buffered events)
+  Visitor self-erase (GDPR/CCPA): window.ThreeEye.forget()
+{%- endcomment -%}
+
+<script
+  src="/apps/threeye/threeye.js"
+  data-shop="{{ shop.permanent_domain }}"
+  data-ingest="/apps/threeye/ingest"
+  data-consent="{{ block.settings.consent_mode | default: 'not_required' }}"
+  defer
+></script>
+
+{% schema %}
+{
+  "name": "3eye Capture",
+  "target": "body",
+  "settings": [
+    {
+      "type": "paragraph",
+      "content": "3eye finds where your storefront environment is quietly costing you checkout conversions. It captures consent-first, aggregate-only signals (web vitals and funnel steps). No PII, no cookies, no fingerprinting, no cross-site tracking."
+    },
+    {
+      "type": "header",
+      "content": "Consent"
+    },
+    {
+      "type": "select",
+      "id": "consent_mode",
+      "label": "Consent mode",
+      "options": [
+        { "value": "not_required", "label": "Not required — capture immediately" },
+        { "value": "pending", "label": "Wait for my consent banner" }
+      ],
+      "default": "not_required",
+      "info": "Choose 'Wait for my consent banner' if you show one. On accept call window.ThreeEye.consent('granted'); on decline call window.ThreeEye.consent('denied')."
+    },
+    {
+      "type": "header",
+      "content": "Visitor privacy"
+    },
+    {
+      "type": "paragraph",
+      "content": "To let a visitor erase their own data, call window.ThreeEye.forget(). It clears the in-tab visit id and requests deletion of everything tied to it."
+    }
+  ]
+}
+{% endschema %}

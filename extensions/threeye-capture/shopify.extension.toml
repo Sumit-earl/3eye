@@ -1,0 +1,8 @@
+name = "3eye Capture"
+type = "theme"
+api_version = "2025-01"
+
+# Theme app extension that injects the 3eye capture snippet site-wide.
+# The merchant enables it once under Theme editor → App embeds → "3eye Capture"; the block then
+# loads on every storefront page. The script and its beacon both go through the App Proxy
+# (/apps/threeye/*) so the storefront stays same-origin and Shopify signs the shop for us.

@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cd /workspaces/3eye && ls -la && echo \"---PLANS---\" && ls -la PLANS 2>/dev/null && echo \"---GIT---\" && git status 2>/dev/null | head -20 || echo \"not a git repo\")",
+      "Bash(cd /workspaces/3eye/PLANS && echo \"===v1===\" && ls -la v1 && echo \"===v2===\" && ls -la v2 && echo \"===v3===\" && ls -la v3)",
+      "Bash(cd /workspaces/3eye && echo \"===research===\" && ls -la research && echo \"===docs===\" && ls -la docs && echo \"===snippet===\" && ls -la snippet)"
+    ]
+  }
+}

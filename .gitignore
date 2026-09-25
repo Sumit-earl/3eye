@@ -1,0 +1,32 @@
+node_modules
+.DS_Store
+
+/.cache
+/build
+/app/build
+/public/build/
+/public/_dev
+/public/threeye.js
+/app/public/build
+/prisma/dev.sqlite
+/prisma/dev.sqlite-journal
+database.sqlite
+
+.env
+.env.*
+!.env.example
+
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
+
+/extensions/*/dist
+
+# Ignore shopify files created during app dev
+.shopify/*
+.shopify.lock
+
+# Codespace/tool runtime + archived session artifacts (NOT part of the app)
+/Tmp_resources/
+/.qoder_run/
+qoder-session-backup.jsonl

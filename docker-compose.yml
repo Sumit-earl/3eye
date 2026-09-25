@@ -1,0 +1,21 @@
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: threeye_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: threeye
+      POSTGRES_PASSWORD: threeye_dev
+      POSTGRES_DB: threeye
+    ports:
+      - "5432:5432"
+    volumes:
+      - threeye_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U threeye -d threeye"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  threeye_pgdata:

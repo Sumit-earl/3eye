@@ -1,0 +1,444 @@
+// 3eye — Prisma schema
+// Postgres (native enums + JSON + real migrations) so the schema is prod-accurate.
+// Design intent: v1 telemetry + insights now; v2 billing/entitlement seam; v3 benchmark
+// moat + AI conversation — all modelled up front so we never do a risky post-deploy
+// migration to add a core table. Money is always Int cents; env signals are always
+// coarse buckets (never a fingerprint/uniqueness claim — PRD 4.5, PR-12).
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------- Enums ----------
+
+enum Platform {
+  SHOPIFY
+  // v3 seam: WOO, BIGCOMMERCE, SFCC, GENERIC
+}
+
+enum ShopStatus {
+  ACTIVE
+  UNINSTALLED
+  FROZEN
+}
+
+enum PlanCode {
+  FREE
+  STARTER
+  GROWTH
+  SCALE
+}
+
+enum EntitlementStatus {
+  FREE
+  TRIALING
+  ACTIVE
+  PAST_DUE
+  CANCELED
+}
+
+enum DeviceClass {
+  MOBILE
+  TABLET
+  DESKTOP
+  UNKNOWN
+}
+
+enum BrowserFamily {
+  CHROME
+  SAFARI
+  FIREFOX
+  EDGE
+  SAMSUNG
+  OPERA
+  OTHER
+  UNKNOWN
+}
+
+enum OsFamily {
+  IOS
+  ANDROID
+  WINDOWS
+  MACOS
+  LINUX
+  CHROMEOS
+  OTHER
+  UNKNOWN
+}
+
+enum ConnectionType {
+  CELLULAR
+  WIFI
+  ETHERNET
+  UNKNOWN
+  // Network Information API `type`; frequently unavailable (esp. iOS Safari) →
+  // UNKNOWN and never guessed (PRD 7.2 "variable by device or browser").
+}
+
+enum ConnectionQuality {
+  SLOW_2G
+  G2
+  G3
+  G4
+  UNKNOWN
+  // bucketed from NetworkInformation.effectiveType; coarse on purpose.
+}
+
+enum ConsentStatus {
+  GRANTED
+  DENIED
+  NOT_REQUIRED
+}
+
+enum FunnelEventType {
+  PAGEVIEW
+  ADD_TO_CART
+  BEGIN_CHECKOUT
+  CHECKOUT_HANDOFF
+}
+
+enum PageKind {
+  HOME
+  PRODUCT
+  COLLECTION
+  CART
+  CHECKOUT
+  OTHER
+}
+
+enum Confidence {
+  LOW
+  MEDIUM
+  HIGH
+}
+
+enum ClaimStatus {
+  OBSERVED
+  ESTIMATED
+  CORRELATED
+}
+
+enum AiRole {
+  SYSTEM
+  USER
+  ASSISTANT
+  TOOL
+}
+
+// ---------- Shopify auth session storage ----------
+// Required shape for @shopify/shopify-app-session-storage-prisma — do not rename.
+
+model Session {
+  id                  String    @id
+  shop                String
+  state               String
+  isOnline            Boolean   @default(false)
+  scope               String?
+  expires             DateTime?
+  accessToken         String
+  userId              BigInt?
+  firstName           String?
+  lastName            String?
+  email               String?
+  accountOwner        Boolean   @default(false)
+  locale              String?
+  collaborator        Boolean?  @default(false)
+  emailVerified       Boolean?  @default(false)
+  refreshToken        String?
+  refreshTokenExpires DateTime?
+}
+
+// ---------- Tenancy ----------
+
+model Shop {
+  id             String     @id @default(cuid())
+  platform       Platform   @default(SHOPIFY)
+  shopifyDomain  String     @unique // e.g. mock-shop.myshopify.com
+  shopifyShopId  String? // from webhook; String to stay JSON-safe
+  name           String?
+  currency       String     @default("USD") // ISO-4217
+  timezone       String     @default("UTC")
+  status         ShopStatus @default(ACTIVE)
+  captureEnabled Boolean    @default(true) // kill-switch: when false, /ingest drops all beacons for this shop
+  retentionDays  Int        @default(30) // raw sessions/events pruned after this (PRD PR-06)
+  benchmarkOptIn Boolean    @default(false) // v3 moat: explicit + revocable (PRD 15.3)
+  installedAt    DateTime   @default(now())
+  uninstalledAt  DateTime?
+
+  // Set when new order/telemetry data lands after the last aggregation; cleared on recompute.
+  // Lets the UI show "new data since last compute" without recomputing on every webhook.
+  aggregatesStale Boolean   @default(false)
+  lastOrderAt     DateTime?
+  // Last successful retention prune (raw telemetry older than retentionDays was deleted).
+  // Drives the admin "Data retention" card and makes the pruner observable.
+  lastRetentionPruneAt DateTime?
+
+  entitlement      Entitlement?
+  visitSessions    VisitSession[]
+  funnelEvents     FunnelEvent[]
+  orders           Order[]
+  segmentSnapshots SegmentSnapshot[]
+  leaks            Leak[]
+  aiConversations  AiConversation[]
+  auditEvents      AuditEvent[]
+  aggregationRuns  AggregationRun[]
+
+  @@index([status])
+}
+
+// ---------- Billing / entitlement seam (free in v1; tiers defined + gated for v2) ----------
+
+model Plan {
+  id                  String   @id @default(cuid())
+  code                PlanCode @unique
+  name                String
+  priceCents          Int      @default(0) // monthly, in cents (never float money)
+  sessionLimitMonthly Int // metered cap
+  maxLeaksShown       Int      @default(1) // -1 = unlimited
+  historyDays         Int      @default(7)
+  features            Json     @default("{}") // {comparison, alerts, digest, aiChat}
+  shopifyPlanHandle   String? // set when wired to Shopify Billing (v2)
+  isActive            Boolean  @default(true)
+  sortOrder           Int      @default(0)
+  createdAt           DateTime @default(now())
+
+  entitlements Entitlement[]
+}
+
+model Entitlement {
+  id                    String            @id @default(cuid())
+  shopId                String            @unique
+  shop                  Shop              @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  planId                String
+  plan                  Plan              @relation(fields: [planId], references: [id])
+  status                EntitlementStatus @default(FREE)
+  shopifySubscriptionId String? // from Shopify Billing (v2)
+  sessionsUsedPeriod    Int               @default(0)
+  periodStart           DateTime          @default(now())
+  periodEnd             DateTime?
+  createdAt             DateTime          @default(now())
+  updatedAt             DateTime          @updatedAt
+
+  @@index([planId])
+}
+
+// ---------- Telemetry (raw-ish; pruned by retention) ----------
+
+model VisitSession {
+  id          String        @id @default(cuid())
+  shopId      String
+  shop        Shop          @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  sessionHash   String // salted, short-TTL, rotated; NOT an identifier (PRD PR-12)
+  consent     ConsentStatus @default(NOT_REQUIRED)
+  startedAt   DateTime      @default(now())
+  endedAt     DateTime?
+
+  // coarse environment buckets only
+  deviceClass       DeviceClass       @default(UNKNOWN)
+  browserFamily     BrowserFamily     @default(UNKNOWN)
+  osFamily          OsFamily          @default(UNKNOWN)
+  connectionType    ConnectionType    @default(UNKNOWN)
+  connectionQuality ConnectionQuality @default(UNKNOWN)
+  regionCountry     String? // ISO-3166 alpha-2, coarse; null if not derivable
+  screenBucket      String? // "small" | "medium" | "large"
+  secureContext     Boolean           @default(true)
+  // Domain-separated HMAC of a checkout/cart token, present only when the storefront handed
+  // one off. Enables best-effort join to an orders/create webhook; null for most visits.
+  checkoutTokenHash String?
+
+  funnelEvents    FunnelEvent[]
+  attributedOrder Order?
+
+  @@unique([shopId, sessionHash])
+  @@unique([shopId, checkoutTokenHash])
+  @@index([shopId, startedAt]) // retention prune + window aggregation
+  @@index([shopId, deviceClass, connectionQuality])
+}
+
+model FunnelEvent {
+  id         String          @id @default(cuid())
+  shopId     String
+  shop       Shop            @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  sessionId  String
+  session    VisitSession    @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  type       FunnelEventType
+  pageKind   PageKind        @default(OTHER)
+  occurredAt DateTime        @default(now())
+
+  // Core Web Vitals for this page (nullable; graceful degradation when unsupported)
+  lcpMs    Int?
+  inpMs    Int?
+  clsScore Float?
+  ttfbMs   Int?
+  fcpMs    Int?
+
+  @@index([sessionId])
+  @@index([shopId, type, occurredAt])
+}
+
+model Order {
+  id             String   @id @default(cuid())
+  shopId         String
+  shop           Shop     @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  shopifyOrderId String   @unique // from orders/create webhook
+  orderNumber    String?
+  currency       String   @default("USD")
+  totalCents     Int
+  subtotalCents  Int?
+  placedAt       DateTime
+  // Attribution is best-effort: Shopify checkout is hosted, so client→order join is
+  // often impossible in v1 (PRD PR-11). Null = aggregate-only attribution.
+  attributedSessionId String?       @unique
+  attributedSession   VisitSession? @relation(fields: [attributedSessionId], references: [id], onDelete: SetNull)
+
+  @@index([shopId, placedAt])
+}
+
+// ---------- Aggregates / insights (product output; kept as history) ----------
+
+model SegmentSnapshot {
+  id          String   @id @default(cuid())
+  shopId      String
+  shop        Shop     @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  windowStart DateTime
+  windowEnd   DateTime
+
+  // dimension combo; null = rolled-up ("any") for that dimension
+  deviceClass       DeviceClass?
+  browserFamily     BrowserFamily?
+  connectionType    ConnectionType?
+  connectionQuality ConnectionQuality?
+  regionCountry     String?
+
+  sessionCount       Int   @default(0)
+  pageviewCount      Int   @default(0)
+  addToCartCount     Int   @default(0)
+  beginCheckoutCount Int   @default(0)
+  estimatedOrders    Int   @default(0) // aggregate-attributed estimate, labelled downstream
+  conversionRate     Float? // begin_checkout→order estimate
+  p75LcpMs           Int?
+  p75InpMs           Int?
+  avgTtfbMs          Int?
+
+  kThreshold Int     @default(50) // min group size (PRD PR-09)
+  suppressed Boolean @default(false) // true if sessionCount < kThreshold → never surfaced
+
+  leaks Leak[]
+
+  @@index([shopId, windowStart])
+  @@index([shopId, deviceClass, connectionQuality, regionCountry])
+}
+
+model Leak {
+  id                String          @id @default(cuid())
+  shopId            String
+  shop              Shop            @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  segmentSnapshotId String
+  segmentSnapshot   SegmentSnapshot @relation(fields: [segmentSnapshotId], references: [id], onDelete: Cascade)
+
+  rank           Int
+  title          String
+  whatIsWrong    String // plain-language description of the observed metric
+  metric         String // e.g. "p75 LCP on begin_checkout"
+  estImpactCents  Int // estimated revenue at risk over the window (never float)
+  windowDays     Int
+  confidence     Confidence
+  status         ClaimStatus // observed vs estimated vs correlated (PRD 4.5, 10.5)
+  method         String // how the estimate was computed — transparency (PRD OB-05)
+  recommendation String // advisory only, never auto-applied (PRD OB-06/OB-14)
+  computedAt     DateTime      @default(now())
+
+  @@index([shopId, computedAt, rank])
+}
+
+model Benchmark {
+  // v3 moat — defined now; populated only from opted-in shops, aggregated + k-anonymized (PRD 15.3)
+  id                String             @id @default(cuid())
+  cohortKey         String
+  deviceClass       DeviceClass?
+  connectionQuality ConnectionQuality?
+  regionCountry     String?
+  distribution      Json // e.g. p50/p75/p90 of LCP + conversion
+  sampleShops       Int
+  computedAt        DateTime           @default(now())
+
+  @@index([cohortKey])
+}
+
+// ---------- AI conversation (paid-gated; reads aggregates only) ----------
+
+model AiConversation {
+  id        String      @id @default(cuid())
+  shopId    String
+  shop      Shop        @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  title     String?
+  model     String?
+  createdAt DateTime    @default(now())
+  updatedAt DateTime    @updatedAt
+  messages  AiMessage[]
+
+  @@index([shopId, updatedAt])
+}
+
+model AiMessage {
+  id             String         @id @default(cuid())
+  conversationId String
+  conversation   AiConversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  role           AiRole
+  content        String         @db.Text
+  toolCalls      Json? // tool invocations/results (read-only aggregate tools only)
+  tokensIn       Int?
+  tokensOut      Int?
+  createdAt      DateTime       @default(now())
+
+  @@index([conversationId, createdAt])
+}
+
+// ---------- Ops / audit ----------
+
+model AggregationRun {
+  id                String    @id @default(cuid())
+  shopId            String
+  shop              Shop      @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  windowStart       DateTime
+  windowEnd         DateTime
+  windowDays        Int       @default(30)
+  status            String    @default("PENDING") // PENDING|RUNNING|DONE|FAILED
+  sessionsProcessed Int       @default(0)
+  error             String?
+  startedAt         DateTime  @default(now())
+  finishedAt        DateTime?
+
+  // Materialized summary of what THIS run computed, so the dashboard header always
+  // describes the exact same window as the persisted leaks (internally-consistent claims).
+  // Money = Int cents; CVR = Int basis points (never float for money/rates).
+  storeOrders         Int @default(0)
+  storeRevenueCents   Int @default(0)
+  storeCvrBp          Int? // store conversion rate in basis points (orders/sessions * 10000)
+  storeP75LcpMs       Int?
+  segmentCount        Int @default(0)
+  suppressedCount     Int @default(0) // segments hidden by k-anonymity (PRD PR-09)
+  leakCount           Int @default(0)
+  totalEstImpactCents Int @default(0)
+
+  @@unique([shopId, windowStart, windowEnd]) // idempotent per window
+}
+
+model AuditEvent {
+  id         String   @id @default(cuid())
+  shopId     String
+  shop       Shop     @relation(fields: [shopId], references: [id], onDelete: Cascade)
+  actorType  String // MERCHANT|SYSTEM|WEBHOOK|AI
+  action     String // DATA_REQUEST|REDACT|SHOP_REDACT|DELETE_ALL|EXPORT|AI_QUERY...
+  targetType String?
+  targetId   String?
+  metadata   Json?
+  createdAt  DateTime @default(now())
+
+  @@index([shopId, createdAt])
+}
