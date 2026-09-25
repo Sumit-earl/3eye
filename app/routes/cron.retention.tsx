@@ -1,4 +1,5 @@
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "@remix-run/node";
+import { json } from "@remix-run/node";
 import { timingSafeEqual } from "node:crypto";
 import { pruneAllShops } from "../../server/retention/prune";
 import { config, isMockShopify } from "../../server/core/config";
@@ -23,10 +24,10 @@ function authorized(request: Request): boolean {
 
 async function run(request: Request) {
   if (!authorized(request)) {
-    return Response.json({ error: "unauthorized" }, { status: 401 });
+    return json({ error: "unauthorized" }, { status: 401 });
   }
   const results = await pruneAllShops();
-  return Response.json({
+  return json({
     results: results.map((r) => ({
       shopId: r.shopId,
       sessionsDeleted: r.sessionsDeleted,
