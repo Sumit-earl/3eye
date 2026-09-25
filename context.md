@@ -167,6 +167,32 @@ server — `GET /apps/threeye/threeye.js`→200 `application/javascript` 10.7KB,
 /apps/threeye/ingest`→204 and the beacon landed (NOT_REQUIRED/DESKTOP/secure, 1 funnel event),
 `GET` ingest→405, `/app`→200. `tsc --noEmit` 0, `build` 0, reseeded clean.
 
+**SLICE 4 — v1 completion sweep: retention pruner + landing + tests + git — DONE + verified.**
+This closed out every remaining v1 gap. **v1 is now feature-complete.**
+
+- **Retention pruner (PR-06).** `server/retention/prune.ts`: `pruneShopRetention` deletes raw
+  VisitSession + FunnelEvent older than `Shop.retentionDays`, batched (1000/batch), keyed on last
+  activity (`endedAt ?? startedAt`). Orders survive (attribution FK is `onDelete:SetNull` — old
+  joins just become aggregate-only). Writes a PII-free `RETENTION_PRUNE` AuditEvent and stamps new
+  `Shop.lastRetentionPruneAt`. `pruneAllShops` iterates ACTIVE shops. Trigger: `POST /cron/retention`
+  (route `cron.retention.tsx`) protected by `CRON_SECRET` header (constant-time); when the secret
+  is unset it only responds in mock mode. Admin "Data retention" card (sidebar, both run/no-run)
+  shows retentionDays + last prune + a manual "Prune now" (action `intent=pruneRetention`).
+  NOTE: use Remix `json()`, not `Response.json` — the node fetch polyfill lacks the static method.
+- **Landing page.** `_index/route.tsx` template copy replaced with real 3eye positioning (login
+  form + `?shop=` redirect preserved). Dead `app.additional.tsx` boilerplate deleted (was unlinked).
+- **Tests.** vitest + `tests/` suite (19 tests, 4 files) over the pure core: `environment.test.ts`
+  (bucketing/UA/connection), `orders-schema.test.ts` (money→cents, currency, date clamps),
+  `verify-proxy.test.ts` (sig round-trip, tamper, domain normalize), `hash.test.ts` (stable,
+  shop-scoped, domain-separated). `tests/setup.ts` stubs DATABASE_URL/INGEST_SALT before config
+  import. `pnpm test` / `npm test` = `vitest run`.
+- **git.** Repo initialized; `.gitignore` was already correct (threeye.js build artifact, .env,
+  lockfiles ignored). Initial commit + a small cron-fix commit on `main`.
+
+**Verified:** pruner unit script 9/9 (stale deleted, fresh kept, counts exact, audit written,
+stamp set); e2e against running server — landing heading served, `POST /cron/retention`→JSON
+summary, `/app`→200, proxy ingest→204; `tsc` 0, vitest 19/19, build 0, reseeded.
+
 ## 6. What's ONGOING / partial
 
 - **Real Shopify wiring** is stubbed behind seams but unexercised (no creds yet): `shopify.app.toml`
@@ -184,30 +210,28 @@ server — `GET /apps/threeye/threeye.js`→200 `application/javascript` 10.7KB,
 - `Product_summay.md` is now **stale/superseded** by this file (still has two inline `Prev_PRD.md`
   refs that should read `archive/Prev_PRD.md`).
 
-## 7. What's NEXT (v1 gaps, roughly prioritized)
+## 7. What's NEXT — v1 is FEATURE-COMPLETE (all gaps closed in Slice 4)
 
-1. ~~Theme app extension~~ — **DONE (Slice 3)**. Remaining: `shopify app deploy` when creds exist.
-2. **Retention pruner job** — enforce `Shop.retentionDays` (default 30): delete raw
-   VisitSession/FunnelEvent older than the window (PRD PR-06). Should be a scheduled/queue task
-   (no queue yet — a cron route or a `server/retention/` core + manual trigger is the v1 shape).
-3. **Replace landing-page boilerplate** — `app/routes/_index/route.tsx` and `app.additional.tsx`
-   are still template copy.
-4. **Tests** — no test runner yet. The throwaway `verify-*.mts` scripts prove behavior but aren't
-   kept. Consider a real suite (vitest) around the pure core (`insight.ts`, `environment.ts`,
-   `orders/schema.ts`, `privacy/*`).
-5. **`git init`** — repo is **not** a git repository yet.
-6. **v2 (post-App-Store-launch prep):** Shopify Billing checkout flow (plans already modelled:
-   `Plan.shopifyPlanHandle`, `Entitlement.shopifySubscriptionId`), comparison/alerts/digest.
-7. **v3:** platform-agnostic core adapters (Woo/BigCommerce), opt-in benchmark moat (`Benchmark`
-   model exists, unpopulated), AI conversation (`AiConversation`/`AiMessage` exist; `AI_PROVIDER`
-   defaults to `mock`), multi-tenant SaaS/Stripe.
+Remaining before/around launch (all gated on creds arriving at END of project):
+1. **`shopify app config link` + `shopify app deploy`** — push the theme app extension + webhook/
+   proxy config to a real Partner app; set `client_id`, real keys, `MOCK_SHOPIFY=false`.
+2. **Real integration test** — OAuth install, orders/create delivery, app-proxy signature against
+   Shopify's real secret, theme embed on a dev store.
+3. **Scheduler hookup** — point a cron at `POST /cron/retention` with `CRON_SECRET` set.
+4. **v2 (post-launch):** Shopify Billing checkout (plans modelled: `Plan.shopifyPlanHandle`,
+   `Entitlement.shopifySubscriptionId`), comparison/alerts/digest.
+5. **v3:** platform-agnostic core adapters (Woo/BigCommerce), opt-in benchmark moat (`Benchmark`
+   model exists, unpopulated), AI conversation (`AI_PROVIDER` defaults to `mock`), multi-tenant SaaS/Stripe.
+6. Nice-to-have: grow the vitest suite (currently 19 tests over pure core) toward `insight.ts`,
+   `orders/handleOrder.ts`, `privacy/*` with a test DB.
 
 ## 8. Data model (Prisma + Postgres 16) — `prisma/schema.prisma`
 
 - `Session` — Shopify auth storage (fixed shape, required by the session-storage-prisma adapter).
 - `Shop` — tenant. `platform`, `shopifyDomain` (unique), `currency`, `timezone`, `status`,
   **`captureEnabled=true`** (kill-switch, Slice 3), `retentionDays=30`, `benchmarkOptIn`,
-  **`aggregatesStale`**, **`lastOrderAt`**. All tenant tables cascade-delete from here.
+  **`aggregatesStale`**, **`lastOrderAt`**, **`lastRetentionPruneAt`** (Slice 4). All tenant
+  tables cascade-delete from here.
 - `Plan` / `Entitlement` — billing seam (free in v1, tiers gated for v2).
 - `VisitSession` — coarse env buckets + `sessionHash` (+**`checkoutTokenHash`**), `consent`,
   `@@unique([shopId,sessionHash])`, `@@unique([shopId,checkoutTokenHash])`.
@@ -220,7 +244,8 @@ server — `GET /apps/threeye/threeye.js`→200 `application/javascript` 10.7KB,
 - `AggregationRun` — idempotent per window + materialized store summary (revenue, CVR bp, counts).
 - `Benchmark` (v3), `AiConversation`/`AiMessage` (v3), `AuditEvent` (privacy/ops log, PII-free).
 - Migrations: `20260925094858_init`, `20260925103147_add_aggregation_summary`,
-  `20260925141335_add_order_attribution`, `20260925145140_add_capture_enabled`.
+  `20260925141335_add_order_attribution`, `20260925145140_add_capture_enabled`,
+  `20260925160153_add_retention_prune_tracking`.
 
 ## 9. File map (key paths)
 
@@ -230,19 +255,20 @@ server/ingest/    handleIngest.ts schema.ts
 server/orders/    handleOrder.ts schema.ts attribution.ts types.ts shopify/mapOrder.ts
 server/privacy/   handleDataRequest.ts handleRedact.ts handleShopRedact.ts deleteMyData.ts audit.ts types.ts
 server/proxy/     verifyProxy.ts (app-proxy signature verify)
+server/retention/ prune.ts (retention pruner, PR-06)
 server/env.ts     loads .env (Node loadEnvFile) for code-first dev
-app/routes/       app.tsx app._index.tsx ingest.tsx storefront.tsx privacy.erase.tsx
+app/routes/       app.tsx app._index.tsx ingest.tsx storefront.tsx privacy.erase.tsx cron.retention.tsx
                   apps.threeye.ingest.tsx apps.threeye.threeye[.]js.tsx (app-proxy endpoints)
                   webhooks.orders.create.tsx webhooks.customers.data_request.tsx
                   webhooks.customers.redact.tsx webhooks.shop.redact.tsx
                   webhooks.app.uninstalled.tsx webhooks.app.scopes_update.tsx
-                  _index/route.tsx (BOILERPLATE) app.additional.tsx (BOILERPLATE)
-                  auth.$.tsx auth.login/* (template auth)
+                  _index/route.tsx (landing, real copy) auth.$.tsx auth.login/* (template auth)
 app/lib/          shop.server.ts insights.server.ts capture.server.ts env.server.ts format.ts
 app/              shopify.server.ts db.server.ts
 prisma/           schema.prisma seed.ts migrations/
 snippet/          threeye.ts  → public/threeye.js (built via vite.snippet.config.ts)
 extensions/       threeye-capture/ (theme app ext: toml + blocks/capture.liquid app-embed + locales)
+tests/            vitest suite (setup.ts + environment/orders-schema/verify-proxy/hash tests)
 archive/          Prev_PRD.md (outdated ancestor PRD) · qoder-session-backup.jsonl (old raw session)
 PLANS/            v1/ v2/ v3/ (most recent product direction)
 research/         supporting research notes
@@ -252,9 +278,9 @@ shopify.app.toml  scopes=read_orders; all webhook uris + [proxy] subpath="threey
 
 ## 10. Suggested next slice
 
-**Retention pruner** (gap #2) — now the top v1 gap. Enforce `Shop.retentionDays` (PRD PR-06): a
-`server/retention/` core that deletes raw `VisitSession`/`FunnelEvent` older than the window per
-shop, plus a thin trigger (a cron-protected HTTP route is the no-queue v1 shape). It completes the
-privacy story and is small/self-contained. Alternatively, **tests** (vitest around the pure core:
-`insight.ts`, `environment.ts`, `orders/schema.ts`, `proxy/verifyProxy.ts`) would pay off before
-the surface grows. Confirm which before starting.
+**v1 is feature-complete — nothing left to build in mock mode.** The next work is
+**credential-gated** (arriving at END of project): `shopify app config link` + `shopify app deploy`,
+real OAuth/orders/app-proxy integration test on a dev store, and cron hookup for
+`/cron/retention`. Until creds arrive, the highest-value optional work is **growing the vitest
+suite** (19 tests now) toward `insight.ts` + `orders/handleOrder.ts` + `privacy/*` with a test DB,
+or starting **v2 billing** behind the existing `Entitlement` seam. Confirm direction.
